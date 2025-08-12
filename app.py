@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 import streamlit as st
-from io import BytesIO
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from typing import Dict, Any, List
+from io import BytesIO
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfbase import pdfmetrics
@@ -12,34 +12,25 @@ from docx import Document
 from docx.shared import Pt
 from docx.oxml.ns import qn
 
-st.set_page_config(page_title="园区招商项目研判 · Streamlit", layout="wide")
+st.set_page_config(page_title="石家庄装备制造产业园 投决会研判（定制版）", layout="wide")
 
-# ---------- 配置 ----------
+# ---------------- 基本配置（可在侧边栏调整） ----------------
 CONFIG = {
     "thresholds": {"investPerMu": 300.0, "taxPerMu": 25.0},
     "horizonMonths": {"land": 36, "existingNoPolicy": 24, "ownFactoryWithPolicy": 36},
-    "weights": {
-        "hard": {"invest": 20, "tax": 15, "funds": 5},
-        "strength": {"trend": 10, "customers": 8, "certs": 7, "finance": 5},
-        "synergy": {"chain": 10, "match": 6, "spillover": 4},
-        "feasibility": {"carrier": 5, "approvals": 4, "resources": 1},
-    },
 }
 
-INDUSTRIES = {
-    "low_altitude": "低空经济",
-    "equipment": "装备制造",
-    "services": "服务配套",
-}
-
+INDUSTRIES = {"low": "低空经济", "svc": "服务类", "eqp": "装备制造类"}
 PROJECT_TYPES = {
     "land": "征地项目",
-    "existingNoPolicy": "购/租现房（无需政策）",
-    "ownFactoryWithPolicy": "购园区自有厂房（需政策）",
+    "existingNoPolicy": "购买/租赁园区或社会现房（无需政策）",
+    "ownFactoryWithPolicy": "购买园区自有厂房（需政策）",
 }
+NEED_TYPES = {"buy": "购买厂房", "rent": "租赁厂房", "ipark": "产业港定制建设"}
+CARRIERS = {"kcg": "园区自有科创谷厂房", "ipark": "产业港厂房", "social": "社会现房"}
 
-# ---------- 工具函数 ----------
-def number_or_zero(v) -> float:
+# ---------------- 工具函数 ----------------
+def nz(v):
     try:
         if v is None or v == "":
             return 0.0
@@ -52,33 +43,13 @@ def compute_mu(land_mu: float, building_area: float, floor_ratio: float) -> floa
     mu_by_build = (building_area / (floor_ratio * 666.67)) if (building_area and floor_ratio) else 0.0
     return mu_by_land if mu_by_land > 0 else (mu_by_build if mu_by_build > 0 else 0.0)
 
-def clamp(v: float, vmin: float, vmax: float) -> float:
-    return max(vmin, min(vmax, v))
-
-def trend_score(prev: float, curr: float) -> float:
-    if curr > prev * 1.05:
-        return 1.0
-    if curr >= prev * 0.95:
-        return 0.6
-    return 0.2
-
-def ratio_band_score(ratio: float, bands=(0.5, 0.7, 0.9)) -> float:
-    # ratio越小越好，这里用于简化财务健康度（净利为负 → 风险高）
-    if ratio <= bands[0]:
-        return 1.0
-    if ratio <= bands[1]:
-        return 0.7
-    if ratio <= bands[2]:
-        return 0.4
-    return 0.2
-
-# ---------- 数据结构 ----------
+# ---------------- 数据结构 ----------------
 @dataclass
-class ModelInput:
+class Model:
+    # 简介
     projectName: str = ""
-    industry: str = "equipment"
+    locate: str = ""
     projectType: str = "land"
-    locationNote: str = ""
     landMu: float = 0.0
     buildingArea: float = 0.0
     floorRatio: float = 0.0
@@ -86,445 +57,424 @@ class ModelInput:
     investEquipment: float = 0.0
     investCivil: float = 0.0
     expectedAnnualTax: float = 0.0
+    expectedOutput: float = 0.0
+    expectedJobs: int = 0
+    introContent: str = ""
+
+    # 研判1：产业与主体
+    industry: str = "eqp"
     companyName: str = ""
     establishedYear: str = ""
-    registeredInLuan: bool = True
+    registeredAt: str = ""
+    isLuanReg: bool = True
+    importBusiness: str = ""
+    newBusiness: str = ""
+
+    # 研判2：需求/业务/资质/客户/协同
+    needType: str = "buy"
+    carrier: str = "kcg"
+    yearsStable: int = 3
+    techTitles: str = ""  # 省/国家级称号
+    chainMaturity: str = "成熟"
+    innovation: str = "较强"
+    customerStable: str = "稳定"
+    marketBase: str = "扎实"
+    chainSegmentFill: str = ""
+    parkStrengthen: str = ""
+
+    # 经营趋势
     revenuePrev: float = 0.0
     revenueCurr: float = 0.0
     taxPrev: float = 0.0
     taxCurr: float = 0.0
-    netProfitPrev: float = 0.0
-    netProfitCurr: float = 0.0
-    ordersInHand: float = 0.0
-    bankCreditReady: bool = False
-    topCustomersStable: bool = False
-    certHighTech: bool = False
-    certSpecTiny: bool = False
-    certOtherCount: int = 0
-    riskDishonest: bool = False
-    riskEnvSafety: bool = False
-    riskIllegalLand: bool = False
-    riskCoreLicenseMissing: bool = False
-    synergyLevel: int = 1   # 0/1/2
-    approvalsLevel: int = 1 # 0/1/2
-    carrierMatch: int = 1   # 0/1/2
-    resourcesLevel: int = 1 # 0/1/2
-    customIntro: str = ""
-    policyCoverYearsLimit: float = 5.0  # 需政策类型的覆盖期阈值（年），仅文案展示
+    profitPrev: float = 0.0
+    profitCurr: float = 0.0
+    industryTrend: str = "向好"
 
-def evaluate(m: ModelInput) -> Dict[str, Any]:
+    # 风险项
+    riskDishonest: bool = False
+    riskEnv: bool = False
+    riskIllegalLand: bool = False
+    riskLicenseMissing: bool = False
+
+def evaluate(m: Model) -> Dict[str, Any]:
     mu = compute_mu(m.landMu, m.buildingArea, m.floorRatio)
     fixed_assets = m.investEquipment + m.investCivil
     invest_intensity = (fixed_assets / mu) if mu > 0 else 0.0
     tax_intensity = (m.expectedAnnualTax / mu) if mu > 0 else 0.0
 
-    veto_reasons: List[str] = []
+    veto_reasons = []
     if m.riskDishonest: veto_reasons.append("失信被执行/严重信用风险")
-    if m.riskEnvSafety: veto_reasons.append("重大环保/安监处罚未结")
+    if m.riskEnv: veto_reasons.append("重大环保/安监处罚未结")
     if m.riskIllegalLand: veto_reasons.append("违法违规用地")
-    if m.riskCoreLicenseMissing: veto_reasons.append("核心资质缺失且短期不可补齐")
+    if m.riskLicenseMissing: veto_reasons.append("核心资质缺失且短期不可补齐")
     veto = len(veto_reasons) > 0
 
-    W = CONFIG["weights"]
-    T = CONFIG["thresholds"]
+    thI = CONFIG["thresholds"]["investPerMu"]
+    thT = CONFIG["thresholds"]["taxPerMu"]
+    pass_hard = (invest_intensity >= thI) and (tax_intensity >= thT)
 
-    # A 硬达标性 0-40
-    aInvest = clamp(invest_intensity / T["investPerMu"], 0, 1) * W["hard"]["invest"]
-    aTax = clamp(tax_intensity / T["taxPerMu"], 0, 1) * W["hard"]["tax"]
-    aFunds = (W["hard"]["funds"] if m.bankCreditReady else 0)
-    A = aInvest + aTax + aFunds
+    # 补齐差额（用于文案）
+    invest_need = max(0.0, thI * mu - fixed_assets)
+    tax_need = max(0.0, thT * mu - m.expectedAnnualTax)
 
-    # B 企业实力 0-30
-    revScore = trend_score(m.revenuePrev, m.revenueCurr)
-    taxScore = trend_score(m.taxPrev, m.taxCurr)
-    trendPoints = (revScore * 0.6 + taxScore * 0.4) * W["strength"]["trend"]
-    custPoints = (W["strength"]["customers"] if m.topCustomersStable else 0)
-    cert_count = (1 if m.certHighTech else 0) + (1 if m.certSpecTiny else 0) + max(0, int(m.certOtherCount))
-    cert_factor = 1 if cert_count >= 3 else (0.8 if cert_count == 2 else (0.6 if cert_count == 1 else 0.3))
-    certPoints = cert_factor * W["strength"]["certs"]
-    # 简化财务健康：净利为正→0.6；净利为负→0.9（越大越差，故得分越低）
-    finance_ratio = 0.6 if m.netProfitCurr >= 0 else 0.9
-    financePoints = ratio_band_score(finance_ratio, (0.5, 0.7, 0.9)) * W["strength"]["finance"]
-    B = trendPoints + custPoints + certPoints + financePoints
+    # 简单评分（用于排序/参考，不显示细则）
+    score = 0
+    score += min(invest_intensity / thI, 1) * 40
+    score += min(tax_intensity / thT, 1) * 30
+    # 企业稳定/资质/客户/协同的加分（粗略）
+    if m.yearsStable >= 3: score += 10
+    if "国家" in m.techTitles: score += 8
+    elif "省" in m.techTitles or "河北" in m.techTitles: score += 5
+    if m.customerStable == "稳定": score += 5
+    if m.chainSegmentFill or m.parkStrengthen: score += 5
+    score = round(min(score, 100), 1)
 
-    # C 产业协同 0-20
-    chainPoints = (1 if m.synergyLevel == 2 else 0.6 if m.synergyLevel == 1 else 0.3) * W["synergy"]["chain"]
-    matchPoints = 1.0 * W["synergy"]["match"]  # 产业枚举即认为匹配
-    spillPoints = (1 if m.registeredInLuan else 0.6) * W["synergy"]["spillover"]
-    C = chainPoints + matchPoints + spillPoints
-
-    # D 可落地与合规 0-10
-    carrierPoints = (1 if m.carrierMatch == 2 else 0.6 if m.carrierMatch == 1 else 0.2) * W["feasibility"]["carrier"]
-    approvalsPoints = (1 if m.approvalsLevel == 2 else 0.6 if m.approvalsLevel == 1 else 0.2) * W["feasibility"]["approvals"]
-    resourcesPoints = (1 if m.resourcesLevel == 2 else 0.6 if m.resourcesLevel == 1 else 0.2) * W["feasibility"]["resources"]
-    D = carrierPoints + approvalsPoints + resourcesPoints
-
-    total = round(A + B + C + D, 1)
-
-    pass_hard = (invest_intensity >= T["investPerMu"]) and (tax_intensity >= T["taxPerMu"])
-
-    # 决策建议
-    decision = "附条件通过"
+    # 结论与建议
     reasons: List[str] = []
+    decision = "附条件通过"
     if veto:
         decision = "暂缓/拒绝"
         reasons.append("命中一票否决：" + "；".join(veto_reasons))
-    elif not pass_hard:
-        if total >= 70:
-            decision = "附条件通过"
-            if invest_intensity < T["investPerMu"]:
-                reasons.append("投资强度低于300万/亩，需增资或优化产线")
-            if tax_intensity < T["taxPerMu"]:
-                reasons.append("税收强度低于25万/亩，需补充订单/调整产品结构")
-        else:
-            decision = "暂缓/拒绝"
-            reasons.append("硬指标未达标且综合评分偏低")
     else:
-        if total >= 80:
+        if pass_hard and score >= 75:
             decision = "通过/签约"
-        elif total >= 60:
+        elif pass_hard or score >= 60:
             decision = "附条件通过"
-            reasons.append("建议补齐要件后签约，提高成功率")
         else:
             decision = "暂缓/拒绝"
-            reasons.append("综合评分不足")
+        if not pass_hard:
+            if invest_need > 0:
+                reasons.append(f"投资强度未达标：需追加固定投资约 {invest_need:.0f} 万元")
+            if tax_need > 0:
+                reasons.append(f"税收强度未达标：需新增年税收约 {tax_need:.0f} 万元")
+        # 趋势提示
+        if m.revenueCurr < m.revenuePrev:
+            reasons.append("近两年营收下滑，需关注订单与产能匹配")
+        if m.taxCurr < m.taxPrev:
+            reasons.append("近两年税收下滑，需核实产品结构与价格策略")
 
-    clauses: List[str] = []
-    if decision != "暂缓/拒绝":
-        clauses.extend([
-            "注册地：石家庄市栾城区",
-            "经济效益考核：投资/税收强度达标（合同约定）",
-            "厂房不可转租或分割",
-            "业务导入清单与时间表（签约即生效）",
-        ])
-    if m.projectType == "ownFactoryWithPolicy" and decision != "暂缓/拒绝":
-        clauses.append("政策支持：按净新增税收覆盖期≤X年分期兑现；未达标触发追偿/递延")
+    # 建议清单（按你提供的五点落地）
+    advice: List[str] = []
+    # (1) 签约条款
+    advice.append("签约：在入驻协议中明确企业注册园区、经济效益考核、厂房不可转租/分割，建立项目跟踪与服务机制，确保业务按约导入并投产达效。")
+    # (2) 产业港“双同步”
+    if m.needType == "ipark" or m.projectType in ["land", "ownFactoryWithPolicy"] and CARRIERS.get(m.carrier,"") == "产业港厂房":
+        advice.append("产业港项目：产发公司采取“双同步”推进——推进载体建设（征收→设计→施工→验收），并同步匹配地块/厂房与企业需求，防止“签约不落地”。")
+    # (3) 经济效益≥2000 万触发入统指导
+    if m.expectedAnnualTax >= 2000 or (m.expectedOutput and m.expectedOutput >= 20000):
+        advice.append("经济服务局做好项目经济指标跟踪与入统指导，帮助企业熟悉统计口径与申报流程，确保达条件后及时纳入统计范围。")
+    # (4) 产业协同服务
+    if m.chainSegmentFill or m.parkStrengthen:
+        advice.append("协同发展：产发公司与经济服务局协同做好企业服务与培育，围绕补链环节开展上下游对接，增强园区相关环节实力。")
+    # (5) 征地与手续服务
+    if m.projectType == "land":
+        advice.append("征地项目：产发公司与企业对接土地收储与摘牌，协助办理环评、消防、安评等，确保建设与生产合法合规。")
 
-    horizon = CONFIG["horizonMonths"][m.projectType]
+    # 简介段落（完全按你给的模板）
+    intro = (
+        f"{m.projectName}，计划投资{m.investTotal:.0f}万元，{m.locate or '拟选址待定'}；"
+        f"占地{m.landMu or 0:.2f}亩/实际建筑面积{m.buildingArea or 0:.0f}㎡，"
+        f"建设内容：{m.introContent or '——'}；预计经济效益：年税收{m.expectedAnnualTax:.0f}万元"
+        + (f"、年产值{m.expectedOutput:.0f}万元" if m.expectedOutput else "")
+        + (f"、就业{m.expectedJobs}人" if m.expectedJobs else "")
+        + "。"
+    )
 
-    auto_intro = f"""{m.projectName or '某项目'}，计划投资{m.investTotal:.0f}万元，{m.locationNote or '拟选址待定'}；\\
-占地{m.landMu or '-'}亩/建筑面积{m.buildingArea or '-'}㎡，建设内容：{m.customIntro or '——'}；\\
-预计达产后年税收{m.expectedAnnualTax:.0f}万元，按{horizon}个月达产测算。"""
+    # 研判文字 1（项目类别与主体）
+    reg_part = f"{m.companyName}，{m.establishedYear}年注册于{m.registeredAt or '—'}；"
+    if m.isLuanReg:
+        reg_part += f"拟将{m.importBusiness or '相关'}业务导入园区"
+        if m.newBusiness:
+            reg_part += f"，并拓展{m.newBusiness}新业务"
+        reg_part += "。"
+    else:
+        reg_part += f"尚未注册于园区，拟将{m.importBusiness or '相关'}业务导入园区"
+        if m.newBusiness:
+            reg_part += f"，并拓展{m.newBusiness}新业务"
+        reg_part += "。"
+    judge_1 = (
+        f"项目为{INDUSTRIES[m.industry]}方向，符合园区发展规划；项目主体为{reg_part}"
+    )
+
+    # 研判文字 2（需求与能力、协同）
+    need_txt = f"该项目主要需求为{NEED_TYPES[m.needType]}，拟承接载体：{CARRIERS[m.carrier]}。"
+    ability_txt = (
+        f"项目拟开展业务：{m.introContent or '—'}；企业已稳定运行{m.yearsStable}年以上，"
+        f"具有{m.techTitles or '相关'}技术/称号，产业链{m.chainMaturity}、技术创新{m.innovation}，"
+        f"客户资源{m.customerStable}、市场基础{m.marketBase}。"
+    )
+    synergy_txt = ""
+    if m.chainSegmentFill or m.parkStrengthen:
+        synergy_txt = (
+            f"入园后，有望填补园区产业链的“{m.chainSegmentFill or '—'}”环节，"
+            f"增强园区在“{m.parkStrengthen or '—'}”环节的实力。"
+        )
+    judge_2 = need_txt + ability_txt + synergy_txt
+
+    # 研判文字 3（经营与趋势）
+    rev_trend = "稳中向好" if m.revenueCurr >= m.revenuePrev and m.taxCurr >= m.taxPrev else "存在波动"
+    econ_txt = (
+        f"企业近两年营收由{m.revenuePrev:.0f}万元增至{m.revenueCurr:.0f}万元，"
+        f"税收由{m.taxPrev:.0f}万元增至{m.taxCurr:.0f}万元，整体{rev_trend}；"
+        f"结合行业当前趋势“{m.industryTrend}”，预计落地园区后经济效益"
+        f"{'向好' if rev_trend=='稳中向好' or m.industryTrend=='向好' else '需持续观察'}，"
+        f"并带动产业协同发展。"
+    )
+    # 达标校验提示
+    standard = f"达标校验：按折算亩{mu:.2f}亩，投资强度{invest_intensity:.1f}万/亩，税收强度{tax_intensity:.1f}万/亩·年；阈值为投资≥{thI}万/亩、税收≥{thT}万/亩·年。"
 
     return {
         "mu": mu,
-        "fixedAssets": fixed_assets,
         "investIntensity": invest_intensity,
         "taxIntensity": tax_intensity,
+        "passHard": pass_hard,
         "veto": veto,
         "vetoReasons": veto_reasons,
-        "sectionScores": {"A": round(A,1), "B": round(B,1), "C": round(C,1), "D": round(D,1)},
-        "total": total,
-        "passHard": pass_hard,
+        "investNeed": invest_need,
+        "taxNeed": tax_need,
+        "score": score,
         "decision": decision,
         "reasons": reasons,
-        "clauses": clauses,
-        "autoIntro": auto_intro,
-        "horizon": horizon,
+        "advice": advice,
+        "intro": intro,
+        "judge1": judge_1,
+        "judge2": judge_2,
+        "judge3": econ_txt,
+        "standard": standard,
     }
 
-# ---------- 导出：DOCX ----------
-def build_docx_report(m: ModelInput, ev: dict) -> BytesIO:
+# ---------------- 文档导出 ----------------
+def build_docx(m: Model, ev: Dict[str, Any]) -> BytesIO:
     doc = Document()
-    # 设置中文字体
     style = doc.styles['Normal']
     style.font.name = '宋体'
     style._element.rPr.rFonts.set(qn('w:eastAsia'), '宋体')
     style.font.size = Pt(11)
 
-    title = doc.add_heading('项目研判报告', level=1)
-    title.alignment = 0
-
+    doc.add_heading('项目研判报告', level=1)
     doc.add_paragraph('（自动生成 · 仅供投决会参考）')
 
-    # 一、项目简介
     doc.add_heading('一、项目简介', level=2)
-    doc.add_paragraph(ev["autoIntro"])
-    p = doc.add_paragraph()
-    p.add_run(f"项目类型：{PROJECT_TYPES.get(m.projectType,'')}；产业类别：{INDUSTRIES.get(m.industry,'')}")
-    p = doc.add_paragraph()
-    p.add_run(f"折算亩：{ev['mu']:.2f} 亩；投资强度：{ev['investIntensity']:.1f} 万/亩；税收强度：{ev['taxIntensity']:.1f} 万/亩·年")
-    p = doc.add_paragraph()
-    p.add_run(f"达产期参考：{ev['horizon']} 个月")
+    doc.add_paragraph(ev["intro"])
 
-    # 二、阈值校验与评分
-    doc.add_heading('二、阈值校验与评分', level=2)
-    doc.add_paragraph(f"硬指标阈值：投资≥{CONFIG['thresholds']['investPerMu']} 万/亩，税收≥{CONFIG['thresholds']['taxPerMu']} 万/亩·年")
-    doc.add_paragraph("一票否决：" + ("命中（" + "，".join(ev["vetoReasons"]) + "）" if ev["veto"] else "未命中"))
-    doc.add_paragraph(f"A 硬达标性：{ev['sectionScores']['A']} / 40")
-    doc.add_paragraph(f"B 企业实力：{ev['sectionScores']['B']} / 30")
-    doc.add_paragraph(f"C 产业协同：{ev['sectionScores']['C']} / 20")
-    doc.add_paragraph(f"D 可落地与合规：{ev['sectionScores']['D']} / 10")
-    doc.add_paragraph(f"综合评分：{ev['total']} / 100")
+    doc.add_heading('二、研判', level=2)
+    doc.add_paragraph("1）项目类别与主体")
+    doc.add_paragraph(ev["judge1"])
+    doc.add_paragraph("2）需求与能力、产业协同")
+    doc.add_paragraph(ev["judge2"])
+    doc.add_paragraph("3）经营情况与趋势")
+    doc.add_paragraph(ev["judge3"])
+    doc.add_paragraph(ev["standard"])
+    if not ev["passHard"]:
+        if ev["investNeed"] > 0:
+            doc.add_paragraph(f"— 投资补齐建议：追加固定投资约 {ev['investNeed']:.0f} 万元。")
+        if ev["taxNeed"] > 0:
+            doc.add_paragraph(f"— 税收补齐建议：新增年税收约 {ev['taxNeed']:.0f} 万元。")
+    if ev["veto"]:
+        doc.add_paragraph("— 风险提示（命中一票否决）："+ "；".join(ev["vetoReasons"]))
 
-    # 三、研判结论与建议
-    doc.add_heading('三、研判结论与建议', level=2)
+    doc.add_heading('三、结论与建议', level=2)
     doc.add_paragraph(f"结论：{ev['decision']}")
     if ev["reasons"]:
         doc.add_paragraph("主要原因：")
         for r in ev["reasons"]:
             doc.add_paragraph(r, style=None).style = doc.styles['List Bullet']
-    if ev["clauses"]:
-        doc.add_paragraph("签约/附条件条款建议：")
-        for c in ev["clauses"]:
-            doc.add_paragraph(c, style=None).style = doc.styles['List Bullet']
+    doc.add_paragraph("建议：")
+    for a in ev["advice"]:
+        doc.add_paragraph(a, style=None).style = doc.styles['List Bullet']
 
-    # 四、补充说明
-    doc.add_heading('四、补充说明', level=2)
-    doc.add_paragraph("若为“购园区自有厂房（需政策）”类型，需在投决前完成净新增税收覆盖期测算，并明确分期兑现与追偿/递延机制。")
+    bio = BytesIO(); doc.save(bio); bio.seek(0); return bio
 
-    bio = BytesIO()
-    doc.save(bio)
-    bio.seek(0)
-    return bio
-
-# ---------- 导出：PDF ----------
-def build_pdf_report(m: ModelInput, ev: dict) -> BytesIO:
+def build_pdf(m: Model, ev: Dict[str, Any]) -> BytesIO:
     pdfmetrics.registerFont(UnicodeCIDFont('STSong-Light'))
     W, H = A4
     bio = BytesIO()
     c = canvas.Canvas(bio, pagesize=A4)
     c.setTitle("项目研判报告")
 
-    def draw_text(x, y, text, font='STSong-Light', size=11):
-        c.setFont(font, size)
-        # 简单换行：按行分割
-        line_height = size * 1.35
-        max_chars = 38  # 粗略估计（中文等宽）
-        lines = []
+    def draw_text(x, y, text, size=11):
+        c.setFont('STSong-Light', size)
+        line_height = size * 1.32
+        max_chars = 38
         for para in text.split("\\n"):
             while len(para) > max_chars:
-                lines.append(para[:max_chars])
+                c.drawString(x, y, para[:max_chars]); y -= line_height
                 para = para[max_chars:]
-            lines.append(para)
-        for i, ln in enumerate(lines):
-            c.drawString(x, y - i * line_height, ln)
-        return y - len(lines) * line_height - 4
+            c.drawString(x, y, para); y -= line_height
+        return y - 4
 
-    margin = 20 * mm
-    y = H - margin
-    c.setFont('STSong-Light', 16)
-    c.drawString(margin, y, "项目研判报告")
-    y -= 10 * mm
-    c.setFont('STSong-Light', 10)
-    c.drawString(margin, y, "（自动生成 · 仅供投决会参考）")
-    y -= 8 * mm
+    margin = 20*mm; y = H - margin
+    c.setFont('STSong-Light', 16); c.drawString(margin, y, "项目研判报告"); y -= 10*mm
+    c.setFont('STSong-Light', 10); c.drawString(margin, y, "（自动生成 · 仅供投决会参考）"); y -= 8*mm
 
-    # 一、项目简介
-    c.setFont('STSong-Light', 13); c.drawString(margin, y, "一、项目简介"); y -= 7 * mm
-    intro_lines = [
-        ev["autoIntro"],
-        f"项目类型：{PROJECT_TYPES.get(m.projectType,'')}；产业类别：{INDUSTRIES.get(m.industry,'')}",
-        f"折算亩：{ev['mu']:.2f} 亩；投资强度：{ev['investIntensity']:.1f} 万/亩；税收强度：{ev['taxIntensity']:.1f} 万/亩·年",
-        f"达产期参考：{ev['horizon']} 个月",
-    ]
-    for t in intro_lines:
-        y = draw_text(margin, y, t, size=11)
+    c.setFont('STSong-Light', 13); c.drawString(margin, y, "一、项目简介"); y -= 7*mm
+    y = draw_text(margin, y, ev["intro"])
 
-    # 二、阈值校验与评分
-    c.setFont('STSong-Light', 13); c.drawString(margin, y, "二、阈值校验与评分"); y -= 7 * mm
-    y = draw_text(margin, y, f"硬指标阈值：投资≥{CONFIG['thresholds']['investPerMu']} 万/亩，税收≥{CONFIG['thresholds']['taxPerMu']} 万/亩·年")
-    veto_text = "一票否决：" + ("命中（" + "，".join(ev["vetoReasons"]) + "）" if ev["veto"] else "未命中")
-    y = draw_text(margin, y, veto_text)
-    y = draw_text(margin, y, f"A 硬达标性：{ev['sectionScores']['A']} / 40")
-    y = draw_text(margin, y, f"B 企业实力：{ev['sectionScores']['B']} / 30")
-    y = draw_text(margin, y, f"C 产业协同：{ev['sectionScores']['C']} / 20")
-    y = draw_text(margin, y, f"D 可落地与合规：{ev['sectionScores']['D']} / 10")
-    y = draw_text(margin, y, f"综合评分：{ev['total']} / 100")
+    c.setFont('STSong-Light', 13); c.drawString(margin, y, "二、研判"); y -= 7*mm
+    y = draw_text(margin, y, "1）项目类别与主体")
+    y = draw_text(margin, y, ev["judge1"])
+    y = draw_text(margin, y, "2）需求与能力、产业协同")
+    y = draw_text(margin, y, ev["judge2"])
+    y = draw_text(margin, y, "3）经营情况与趋势")
+    y = draw_text(margin, y, ev["judge3"])
+    y = draw_text(margin, y, ev["standard"])
+    if not ev["passHard"]:
+        if ev["investNeed"] > 0:
+            y = draw_text(margin, y, f"— 投资补齐建议：追加固定投资约 {ev['investNeed']:.0f} 万元。")
+        if ev["taxNeed"] > 0:
+            y = draw_text(margin, y, f"— 税收补齐建议：新增年税收约 {ev['taxNeed']:.0f} 万元。")
+    if ev["veto"]:
+        y = draw_text(margin, y, "— 风险提示（命中一票否决）："+ "；".join(ev["vetoReasons"]))
 
-    # 三、研判结论与建议
-    c.setFont('STSong-Light', 13); c.drawString(margin, y, "三、研判结论与建议"); y -= 7 * mm
+    c.setFont('STSong-Light', 13); c.drawString(margin, y, "三、结论与建议"); y -= 7*mm
     y = draw_text(margin, y, f"结论：{ev['decision']}")
     if ev["reasons"]:
         y = draw_text(margin, y, "主要原因：")
         for r in ev["reasons"]:
-            y = draw_text(margin + 8, y, f"• {r}")
-    if ev["clauses"]:
-        y = draw_text(margin, y, "签约/附条件条款建议：")
-        for ctext in ev["clauses"]:
-            y = draw_text(margin + 8, y, f"• {ctext}")
+            y = draw_text(margin+8, y, f"• {r}")
+    y = draw_text(margin, y, "建议：")
+    for a in ev["advice"]:
+        y = draw_text(margin+8, y, f"• {a}")
 
-    # 四、补充说明
-    c.setFont('STSong-Light', 13); c.drawString(margin, y, "四、补充说明"); y -= 7 * mm
-    y = draw_text(margin, y, "若为“购园区自有厂房（需政策）”类型，需在投决前完成净新增税收覆盖期测算，并明确分期兑现与追偿/递延机制。")
+    c.showPage(); c.save(); bio.seek(0); return bio
 
-    c.showPage()
-    c.save()
-    bio.seek(0)
-    return bio
-
-# ---------- UI ----------
-st.markdown("### 石家庄装备制造产业园 — 招商项目研判（Streamlit 版）")
-st.caption("前端输入主要信息 → 后端计算评分与结论 → 可导出 Word/PDF 报告")
+# ---------------- UI ----------------
+st.markdown("## 石家庄装备制造产业园 — 投资决策委员会 项目研判（定制版）")
+st.caption("按照你提供的报告结构与表述自动生成文字，校验“投资≥300万/亩、税收≥25万/亩”，并给出补齐差额与建议。")
 
 with st.sidebar:
-    st.subheader("基础设置")
-    st.write("达产期（仅用于文案）")
-    CONFIG["horizonMonths"]["land"] = st.number_input("征地（个月）", 12, 60, CONFIG["horizonMonths"]["land"])
-    CONFIG["horizonMonths"]["existingNoPolicy"] = st.number_input("现房无政策（个月）", 6, 48, CONFIG["horizonMonths"]["existingNoPolicy"])
-    CONFIG["horizonMonths"]["ownFactoryWithPolicy"] = st.number_input("自有厂房需政策（个月）", 12, 60, CONFIG["horizonMonths"]["ownFactoryWithPolicy"])
-    st.write("硬指标阈值")
-    CONFIG["thresholds"]["investPerMu"] = float(st.number_input("投资强度阈值（万/亩）", 0.0, 5000.0, CONFIG["thresholds"]["investPerMu"]))
+    st.subheader("参数设置")
+    CONFIG["thresholds"]["investPerMu"] = float(st.number_input("固定投资阈值（万/亩）", 0.0, 10000.0, CONFIG["thresholds"]["investPerMu"]))
     CONFIG["thresholds"]["taxPerMu"] = float(st.number_input("税收强度阈值（万/亩·年）", 0.0, 1000.0, CONFIG["thresholds"]["taxPerMu"]))
+    CONFIG["horizonMonths"]["land"] = st.number_input("征地达产期（月）", 6, 60, CONFIG["horizonMonths"]["land"])
+    CONFIG["horizonMonths"]["existingNoPolicy"] = st.number_input("现房达产期（月）", 6, 60, CONFIG["horizonMonths"]["existingNoPolicy"])
+    CONFIG["horizonMonths"]["ownFactoryWithPolicy"] = st.number_input("自有厂房达产期（月）", 6, 60, CONFIG["horizonMonths"]["ownFactoryWithPolicy"])
 
-# --- 表单 ---
-cols = st.columns(2)
-with cols[0]:
-    st.header("一、项目基本信息")
+col1, col2 = st.columns(2)
+
+with col1:
+    st.header("一、项目简介（输入）")
     projectName = st.text_input("项目名称", value="高端装备制造项目")
-    industry = st.selectbox("产业类别", options=list(INDUSTRIES.keys()), format_func=lambda k: INDUSTRIES[k])
+    locate = st.text_input("拟选址", value="栾城区科创谷/产业港")
     projectType = st.selectbox("项目类型", options=list(PROJECT_TYPES.keys()), format_func=lambda k: PROJECT_TYPES[k])
-    locationNote = st.text_input("拟选址/备注", value="科创谷/产业港X期")
-    landMu = number_or_zero(st.text_input("占地（亩）", value=""))
-    buildingArea = number_or_zero(st.text_input("建筑面积（㎡）", value=""))
-    floorRatio = number_or_zero(st.text_input("容积率（折算用）", value=""))
 
-    st.header("二、投资与效益")
-    investTotal = number_or_zero(st.text_input("计划总投资（万元）", value="10000"))
-    investEquipment = number_or_zero(st.text_input("设备投资（万元）", value="6000"))
-    investCivil = number_or_zero(st.text_input("土建投资（万元）", value="3000"))
-    expectedAnnualTax = number_or_zero(st.text_input("预计年税收（万元）", value="1500"))
-    bankCreditReady = st.checkbox("资金已落实（自有/授信）", value=True)
+    landMu = st.number_input("占地（亩）", min_value=0.0, step=0.01, value=0.0)
+    buildingArea = st.number_input("实际建筑面积（㎡）", min_value=0.0, step=1.0, value=0.0)
+    floorRatio = st.number_input("容积率（折算用）", min_value=0.0, step=0.1, value=0.0)
 
-with cols[1]:
-    st.header("三、企业与风险")
-    companyName = st.text_input("企业名称", value="某装备制造有限公司")
-    establishedYear = st.text_input("成立年份", value="2015")
-    registeredInLuan = st.checkbox("已在栾城区注册/将注册", value=True)
+    investTotal = st.number_input("计划总投资（万元）", min_value=0.0, value=10000.0, step=100.0)
+    investEquipment = st.number_input("设备投资（万元）", min_value=0.0, value=6000.0, step=100.0)
+    investCivil = st.number_input("土建投资（万元）", min_value=0.0, value=3000.0, step=100.0)
+    expectedAnnualTax = st.number_input("预计年税收（万元）", min_value=0.0, value=1500.0, step=10.0)
+    expectedOutput = st.number_input("预计年产值（万元，可选）", min_value=0.0, value=0.0, step=100.0)
+    expectedJobs = st.number_input("预计就业人数（人，可选）", min_value=0, value=0, step=1)
+    introContent = st.text_area("建设内容（一句话）", value="新建高精度机加工产线与装配线")
 
-    revenuePrev = number_or_zero(st.text_input("上年营收（万元）", value="20000"))
-    revenueCurr = number_or_zero(st.text_input("当年营收（万元）", value="22000"))
-    taxPrev = number_or_zero(st.text_input("上年税收（万元）", value="1200"))
-    taxCurr = number_or_zero(st.text_input("当年税收（万元）", value="1300"))
-    netProfitPrev = number_or_zero(st.text_input("上年净利润（万元）", value="1200"))
-    netProfitCurr = number_or_zero(st.text_input("当年净利润（万元）", value="1300"))
-    topCustomersStable = st.checkbox("Top客户稳定/在手订单充分", value=True)
+with col2:
+    st.header("二、研判要点（输入）")
+    industry = st.selectbox("产业大类", options=list(INDUSTRIES.keys()), format_func=lambda k: INDUSTRIES[k])
+    companyName = st.text_input("项目主体（公司名称）", value="某装备制造有限公司")
+    establishedYear = st.text_input("注册年份", value="2016")
+    registeredAt = st.text_input("注册地", value="石家庄市栾城区")
+    isLuanReg = st.checkbox("若注册在栾城区，则视为“拟将业务导入园区”", value=True)
+    importBusiness = st.text_input("拟导入园区的业务", value="核心零部件制造与总装")
+    newBusiness = st.text_input("拓展新业务（可选）", value="")
 
-    certHighTech = st.checkbox("高新技术企业", value=True)
-    certSpecTiny = st.checkbox("专精特新", value=False)
-    certOtherCount = int(number_or_zero(st.text_input("其他资质/专利数量", value="1")))
+    needType = st.selectbox("主要需求", options=list(NEED_TYPES.keys()), format_func=lambda k: NEED_TYPES[k])
+    carrier = st.selectbox("载体选择", options=list(CARRIERS.keys()), format_func=lambda k: CARRIERS[k])
+    yearsStable = st.number_input("企业稳定运行年限", min_value=0, value=5, step=1)
+    techTitles = st.text_input("技术/称号（如省/国家级、高新、专精特新等）", value="省级专精特新、小巨人")
+    chainMaturity = st.selectbox("产业链条成熟度", options=["完善","成熟","一般"])
+    innovation = st.selectbox("技术创新能力", options=["强","较强","一般"])
+    customerStable = st.selectbox("客户资源稳定性", options=["稳定","一般","不稳定"])
+    marketBase = st.selectbox("市场基础", options=["扎实","一般","较弱"])
+    chainSegmentFill = st.text_input("入园后可填补的产业链环节（可选）", value="关键零部件加工")
+    parkStrengthen = st.text_input("可增强的园区环节（可选）", value="精密加工与总装")
 
-    st.markdown("**一票否决（任一项为“是”建议拒绝）**")
+    st.markdown("**一票否决（任一为“是”建议拒绝）**")
     riskDishonest = st.checkbox("失信被执行/严重信用风险", value=False)
-    riskEnvSafety = st.checkbox("重大环保/安监处罚未结", value=False)
+    riskEnv = st.checkbox("重大环保/安监处罚未结", value=False)
     riskIllegalLand = st.checkbox("违法违规用地", value=False)
-    riskCoreLicenseMissing = st.checkbox("核心资质缺失且短期不可补齐", value=False)
+    riskLicenseMissing = st.checkbox("核心资质缺失且短期不可补齐", value=False)
 
-st.header("四、协同与落地")
-c1, c2, c3, c4 = st.columns(4)
-synergyLevel = c1.selectbox("产业协同程度", options=[2,1,0], index=1, format_func=lambda v: ["协同较弱","一般协同","显著补链/强协同"][2-v])
-approvalsLevel = c2.selectbox("审批要件成熟度", options=[2,1,0], index=1, format_func=lambda v: ["尚未准备","部分具备","要件齐全"][2-v])
-carrierMatch = c3.selectbox("载体匹配度", options=[2,1,0], index=1, format_func=lambda v: ["不匹配/需求不清","基本匹配","高度匹配"][2-v])
-resourcesLevel = c4.selectbox("资源保障", options=[2,1,0], index=1, format_func=lambda v: ["短缺/需新建","基本满足","资源充足"][2-v])
+    st.header("三、经营与趋势（输入）")
+    revenuePrev = st.number_input("上年营收（万元）", min_value=0.0, value=20000.0, step=100.0)
+    revenueCurr = st.number_input("当年营收（万元）", min_value=0.0, value=22000.0, step=100.0)
+    taxPrev = st.number_input("上年税收（万元）", min_value=0.0, value=1200.0, step=10.0)
+    taxCurr = st.number_input("当年税收（万元）", min_value=0.0, value=1300.0, step=10.0)
+    profitPrev = st.number_input("上年净利润（万元）", min_value=-10000.0, value=1200.0, step=10.0)
+    profitCurr = st.number_input("当年净利润（万元）", min_value=-10000.0, value=1300.0, step=10.0)
+    industryTrend = st.selectbox("行业趋势", options=["向好","平稳","承压"])
 
-customIntro = st.text_input("建设内容（一句话）", value="新建高精度机加工产线与装配线")
-
-policyCoverYearsLimit = number_or_zero(st.text_input("（需政策）净新增税收覆盖期阈值（年，仅文案）", value="5"))
-
-# 组装输入
-model = ModelInput(
-    projectName=projectName,
-    industry=industry,
-    projectType=projectType,
-    locationNote=locationNote,
-    landMu=landMu,
-    buildingArea=buildingArea,
-    floorRatio=floorRatio,
-    investTotal=investTotal,
-    investEquipment=investEquipment,
-    investCivil=investCivil,
-    expectedAnnualTax=expectedAnnualTax,
-    companyName=companyName,
-    establishedYear=establishedYear,
-    registeredInLuan=registeredInLuan,
-    revenuePrev=revenuePrev,
-    revenueCurr=revenueCurr,
-    taxPrev=taxPrev,
-    taxCurr=taxCurr,
-    netProfitPrev=netProfitPrev,
-    netProfitCurr=netProfitCurr,
-    topCustomersStable=topCustomersStable,
-    certHighTech=certHighTech,
-    certSpecTiny=certSpecTiny,
-    certOtherCount=certOtherCount,
-    riskDishonest=riskDishonest,
-    riskEnvSafety=riskEnvSafety,
-    riskIllegalLand=riskIllegalLand,
-    riskCoreLicenseMissing=riskCoreLicenseMissing,
-    synergyLevel=synergyLevel,
-    approvalsLevel=approvalsLevel,
-    carrierMatch=carrierMatch,
-    resourcesLevel=resourcesLevel,
-    customIntro=customIntro,
-    policyCoverYearsLimit=policyCoverYearsLimit,
+# 组装模型
+m = Model(
+    projectName=projectName, locate=locate, projectType=projectType,
+    landMu=landMu, buildingArea=buildingArea, floorRatio=floorRatio,
+    investTotal=investTotal, investEquipment=investEquipment, investCivil=investCivil,
+    expectedAnnualTax=expectedAnnualTax, expectedOutput=expectedOutput, expectedJobs=int(expectedJobs),
+    introContent=introContent,
+    industry=industry, companyName=companyName, establishedYear=establishedYear, registeredAt=registeredAt,
+    isLuanReg=isLuanReg, importBusiness=importBusiness, newBusiness=newBusiness,
+    needType=needType, carrier=carrier, yearsStable=int(yearsStable), techTitles=techTitles,
+    chainMaturity=chainMaturity, innovation=innovation, customerStable=customerStable, marketBase=marketBase,
+    chainSegmentFill=chainSegmentFill, parkStrengthen=parkStrengthen,
+    revenuePrev=revenuePrev, revenueCurr=revenueCurr, taxPrev=taxPrev, taxCurr=taxCurr,
+    profitPrev=profitPrev, profitCurr=profitCurr, industryTrend=industryTrend,
+    riskDishonest=riskDishonest, riskEnv=riskEnv, riskIllegalLand=riskIllegalLand, riskLicenseMissing=riskLicenseMissing,
 )
 
-# 评估
-ev = evaluate(model)
+# 评估与生成报告段落
+ev = evaluate(m)
 
-# 摘要卡片
+# 概览卡片
 st.markdown("---")
-k1, k2, k3, k4 = st.columns(4)
-k1.metric("折算亩", f"{ev['mu']:.2f} 亩")
+k1,k2,k3,k4 = st.columns(4)
+k1.metric("折算亩", f"{compute_mu(m.landMu, m.buildingArea, m.floorRatio):.2f} 亩")
 k2.metric("投资强度", f"{ev['investIntensity']:.1f} 万/亩")
 k3.metric("税收强度", f"{ev['taxIntensity']:.1f} 万/亩·年")
-k4.metric("综合评分", f"{ev['total']}/100")
+k4.metric("参考评分", f"{ev['score']} / 100")
 
-# 报告预览
+# 预览报告（完全按你的结构）
 st.markdown("### 预览 · 研判报告")
-st.write(f"**结论：** :{'green' if ev['decision']=='通过/签约' else 'orange' if ev['decision']=='附条件通过' else 'gray'}[{ev['decision']}]")
-if ev["reasons"]:
-    st.write("**主要原因：**")
-    st.write("\\n".join([f"- {r}" for r in ev["reasons"]]))
-if ev["clauses"]:
-    st.write("**签约/附条件条款建议：**")
-    st.write("\\n".join([f"- {c}" for c in ev["clauses"]]))
-
-with st.expander("展开查看完整报告文本"):
-    st.markdown(f"""
+st.markdown(f"""
 **一、项目简介**  
-{ev['autoIntro']}
+{ev['intro']}
 
-- 项目类型：{PROJECT_TYPES.get(model.projectType,'')}；产业类别：{INDUSTRIES.get(model.industry,'')}
-- 折算亩：{ev['mu']:.2f} 亩；投资强度：{ev['investIntensity']:.1f} 万/亩；税收强度：{ev['taxIntensity']:.1f} 万/亩·年
-- 达产期参考：{ev['horizon']} 个月
+**二、研判**  
+1）项目类别与主体  
+{ev['judge1']}
 
-**二、阈值校验与评分**  
-- 硬指标阈值：投资≥{CONFIG['thresholds']['investPerMu']} 万/亩，税收≥{CONFIG['thresholds']['taxPerMu']} 万/亩·年  
-- 一票否决：{"命中（" + "，".join(ev["vetoReasons"]) + "）" if ev["veto"] else "未命中"}  
-- A 硬达标性：{ev['sectionScores']['A']} / 40  
-- B 企业实力：{ev['sectionScores']['B']} / 30  
-- C 产业协同：{ev['sectionScores']['C']} / 20  
-- D 可落地与合规：{ev['sectionScores']['D']} / 10  
+2）需求与能力、产业协同  
+{ev['judge2']}
 
-**三、研判结论与建议**  
-- 结论：{ev['decision']}  
-{"\\n".join([f"- {r}" for r in ev["reasons"]]) if ev["reasons"] else ""}
-**签约/附条件条款建议：**  
-{"\\n".join([f"- {c}" for c in ev["clauses"]]) if ev["clauses"] else ""}
+3）经营情况与趋势  
+{ev['judge3']}
 
-**四、补充说明**  
-若为“购园区自有厂房（需政策）”类型，需在投决前完成净新增税收覆盖期测算，并明确分期兑现与追偿/递延机制。
+{ev['standard']}
 """)
+if not ev["passHard"]:
+    if ev["investNeed"] > 0:
+        st.write(f"- 投资补齐建议：追加固定投资约 **{ev['investNeed']:.0f} 万元**")
+    if ev["taxNeed"] > 0:
+        st.write(f"- 税收补齐建议：新增年税收约 **{ev['taxNeed']:.0f} 万元**")
+if ev["veto"]:
+    st.error("风险提示（命中一票否决）："+ "；".join(ev["vetoReasons"]))
 
-# 导出按钮
-docx_bytes = build_docx_report(model, ev)
-pdf_bytes = build_pdf_report(model, ev)
+st.markdown(f"**三、结论与建议**  \n结论：:{"green" if ev['decision']=='通过/签约' else 'orange' if ev['decision']=='附条件通过' else 'gray'}[{ev['decision']}]")
+if ev["reasons"]:
+    st.write("主要原因：")
+    for r in ev["reasons"]:
+        st.write(f"- {r}")
+st.write("建议：")
+for a in ev["advice"]:
+    st.write(f"- {a}")
 
-left, right = st.columns(2)
-with left:
-    st.download_button(
-        "导出 Word（DOCX）",
-        data=docx_bytes,
-        file_name=f"{model.projectName or '项目'}_研判报告.docx",
-        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    )
-with right:
-    st.download_button(
-        "导出 PDF",
-        data=pdf_bytes,
-        file_name=f"{model.projectName or '项目'}_研判报告.pdf",
-        mime="application/pdf",
-    )
+# 导出
+docx_bytes = build_docx(m, ev)
+pdf_bytes = build_pdf(m, ev)
+c1, c2 = st.columns(2)
+c1.download_button("导出 Word（DOCX）", data=docx_bytes, file_name=f"{m.projectName or '项目'}_研判报告_定制版.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+c2.download_button("导出 PDF", data=pdf_bytes, file_name=f"{m.projectName or '项目'}_研判报告_定制版.pdf", mime="application/pdf")
 
-st.caption("口径提示：投资强度=固定资产/折算亩；税收强度=年税收/折算亩。三类项目统一口径；需政策项目须测算净新增税收覆盖期。")
+st.caption("口径提示：固定投资强度=（设备+土建）/折算亩；税收强度=年税收/折算亩。三类项目统一口径；产业港项目注意“双同步”推进。")
